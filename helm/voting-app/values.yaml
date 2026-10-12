@@ -1,0 +1,61 @@
+## Global image settings
+registry: ghcr.io/teeros
+
+## Vote service
+vote:
+  image:
+    repository: ghcr.io/teeros/example-voting-app-vote
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+  service:
+    type: LoadBalancer
+    port: 80
+
+## Result service
+result:
+  image:
+    repository: ghcr.io/teeros/example-voting-app-result
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 80
+  service:
+    type: LoadBalancer
+    port: 80
+
+## Worker service
+worker:
+  image:
+    repository: ghcr.io/teeros/example-voting-app-worker
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+
+## Redis
+redis:
+  image:
+    repository: redis
+    tag: "7.2-alpine"
+    pullPolicy: IfNotPresent
+  port: 6379
+  service:
+    type: ClusterIP
+    port: 6379
+
+## PostgreSQL
+db:
+  image:
+    repository: postgres
+    tag: "15-alpine"
+    pullPolicy: IfNotPresent
+  port: 5432
+  service:
+    type: ClusterIP
+    port: 5432
+  env:
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    POSTGRES_DB: postgres
+  storage: 1Gi

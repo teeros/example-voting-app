@@ -1,65 +1,151 @@
-# Example Voting App
+# Voting App — DevOps Capstone 1
 
-A simple distributed application running across multiple Docker containers.
+Forked from `dockersamples/example-voting-app` as part of the DevOps Capstone (Beginner Edition).
 
-## Getting started
+**Author:** Teeros | temi.asojo@gmail.com
 
-Download [Docker Desktop](https://www.docker.com/products/docker-desktop) for Mac or Windows. [Docker Compose](https://docs.docker.com/compose) will be automatically installed. On Linux, make sure you have the latest version of [Compose](https://docs.docker.com/compose/install/).
-
-This solution uses Python, Node.js, .NET, with Redis for messaging and Postgres for storage.
-
-Run in this directory to build and run the app:
-
-```shell
-docker compose up
-```
-
-The `vote` app will be running at [http://localhost:8080](http://localhost:8080), and the `results` will be at [http://localhost:8081](http://localhost:8081).
-
-Alternately, if you want to run it on a [Docker Swarm](https://docs.docker.com/engine/swarm/), first make sure you have a swarm. If you don't, run:
-
-```shell
-docker swarm init
-```
-
-Once you have your swarm, in this directory run:
-
-```shell
-docker stack deploy --compose-file docker-stack.yml vote
-```
-
-## Run the app in Kubernetes
-
-The folder k8s-specifications contains the YAML specifications of the Voting App's services.
-
-Run the following command to create the deployments and services. Note it will create these resources in your current namespace (`default` if you haven't changed it.)
-
-```shell
-kubectl create -f k8s-specifications/
-```
-
-The `vote` web app is then available on port 31000 on each host of the cluster, the `result` web app is available on port 31001.
-
-To remove them, run:
-
-```shell
-kubectl delete -f k8s-specifications/
-```
+---
 
 ## Architecture
 
-![Architecture diagram](architecture.excalidraw.png)
+```
+ Browser
+    |
+    |-- port 8080 --> [vote] (Python/Flask)
+    |                    |
+    |                  Redis (queue)
+    |                    |
+    |               [worker] (.NET)
+    |                    |
+    |               PostgreSQL (db)
+    |                    |
+    |-- port 8081 --> [result] (Node.js)
+```
 
-* A front-end web app in [Python](/vote) which lets you vote between two options
-* A [Redis](https://hub.docker.com/_/redis/) which collects new votes
-* A [.NET](/worker/) worker which consumes votes and stores them in…
-* A [Postgres](https://hub.docker.com/_/postgres/) database backed by a Docker volume
-* A [Node.js](/result) web app which shows the results of the voting in real time
+| Service  | Technology | Role |
+|----------|-----------|------|
+| vote     | Python/Flask | Accepts votes, pushes to Redis |
+| redis    | Redis 7     | Message queue between vote and worker |
+| worker   | .NET 7      | Reads from Redis, writes to PostgreSQL |
+| db       | PostgreSQL 15 | Persistent vote storage |
+| result   | Node.js 18  | Reads from PostgreSQL, shows live totals |
 
-## Notes
+---
 
-The voting application only accepts one vote per client browser. It does not register additional votes if a vote has already been submitted from a client.
+## Step 1 — Run locally with Docker Compose
 
-This isn't an example of a properly architected perfectly designed distributed app... it's just a simple
-example of the various types of pieces and languages you might see (queues, persistent data, etc), and how to
-deal with them in Docker at a basic level.
+```bash
+docker compose up --build
+```
+
+- Vote app: http://localhost:8080
+- Result app: http://localhost:8081
+
+---
+
+## Step 2 — Containerize safely
+
+All Dockerfiles have been hardened:
+- **Pinned base images** (`python:3.11-slim`, `node:18-slim`, `postgres:15-alpine`, `redis:7.2-alpine`)
+- **Non-root user** — each image creates and runs as `appuser`
+- **`.dockerignore`** — prevents secrets, caches, and git history from entering the build context
+
+---
+
+## Step 3 — Provision a Kubernetes cluster with Terraform
+
+> Requires: AWS CLI configured, Terraform >= 1.6
+
+```bash
+cd terraform
+terraform init
+terraform plan
+terraform apply      # builds EKS cluster in the default VPC (~10 min)
+
+# Connect kubectl
+aws eks update-kubeconfig --region us-east-1 --name voting-app-cluster
+
+# Tear down and recreate
+terraform destroy
+terraform apply
+```
+
+The cluster uses the **default VPC** and creates a managed node group of 2× `t3.medium` nodes.
+
+---
+
+## Step 4 — CI/CD with GitHub Actions
+
+Pipeline file: `.github/workflows/ci.yml`
+
+Every push to `main` runs four jobs in sequence:
+
+| Job | What it does |
+|-----|-------------|
+| `test` | Runs Python unit tests for the vote service |
+| `scan` | Trivy filesystem scan on all three services |
+| `build-push` | Builds Docker images, tags with commit SHA, pushes to GHCR |
+| `deploy` | `helm upgrade --install` to EKS cluster |
+
+**Required GitHub Secrets** (add in Settings → Secrets → Actions):
+
+| Secret | Value |
+|--------|-------|
+| `AWS_ACCESS_KEY_ID` | Your AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | Your AWS secret key |
+
+Images are pushed to `ghcr.io/teeros/example-voting-app-{vote,result,worker}`.
+
+---
+
+## Step 5 — Deploy and roll back with Helm
+
+```bash
+# First-time install
+helm upgrade --install voting-app ./helm/voting-app \
+  --namespace voting-app --create-namespace
+
+# Ship a bad release (simulate failure)
+helm upgrade voting-app ./helm/voting-app \
+  --namespace voting-app \
+  --set vote.image.tag=bad-tag
+
+# Roll back to the previous good release
+helm rollback voting-app 1 --namespace voting-app
+
+# Check history
+helm history voting-app --namespace voting-app
+```
+
+---
+
+## Project structure
+
+```
+example-voting-app/
+├── vote/               Python vote service
+├── result/             Node.js result service
+├── worker/             .NET worker service
+├── terraform/          EKS cluster (default VPC)
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── versions.tf
+├── helm/
+│   └── voting-app/     Helm chart for all services
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       └── templates/
+├── .github/
+│   └── workflows/
+│       └── ci.yml      Full CI/CD pipeline
+└── docker-compose.yml  Local development
+```
+
+---
+
+## Security — no secrets in Git
+
+- Database credentials are stored in a Kubernetes `Secret` (`helm/voting-app/templates/db-secret.yaml`)
+- AWS credentials live only in GitHub Secrets
+- `.dockerignore` on every service keeps `.env` files out of images
